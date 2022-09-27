@@ -9,12 +9,13 @@ use std::alloc::{handle_alloc_error, GlobalAlloc, Layout, System};
 use std::error::Error;
 use std::io::Write;
 use std::ptr::copy_nonoverlapping;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mmapper::MMapper;
 
 /// The global allocator
 ///
-/// To use as the global memory allocator:
+/// To install as the global memory allocator:
 ///
 /// ```rust
 /// use huge_global_alloc::HugeGlobalAllocator;
@@ -24,19 +25,44 @@ use mmapper::MMapper;
 /// ````
 pub struct HugeGlobalAllocator {
     mapper: MMapper,
-    threshold: usize,
+    threshold: AtomicUsize,
 }
 
 impl HugeGlobalAllocator {
     /// Creates a new allocator. The threshold defines the minimum number of bytes to consider a
     /// huge page allocation.
     pub const fn new(threshold: usize) -> Self {
-        assert!(threshold >= 1024 * 1024);
-
         Self {
             mapper: MMapper::new(),
-            threshold,
+            threshold: AtomicUsize::new(threshold),
         }
+    }
+
+    /// Sets the minimum number of bytes to consider a huge page allocation.
+    ///
+    /// ```rust
+    /// use huge_global_alloc::HugeGlobalAllocator;
+    ///
+    /// #[global_allocator]
+    /// static GLOBAL_ALLOCATOR: HugeGlobalAllocator = HugeGlobalAllocator::new(0); // Switched off
+    /// 
+    /// let vec1: Vec<u8> = Vec::with_capacity(1024 * 1024); // 1mb
+    /// let stats = GLOBAL_ALLOCATOR.stats().unwrap();
+    /// assert_eq!(stats.segments, 0);
+    ///
+    /// GLOBAL_ALLOCATOR.set_threshold(1024 * 1024); // 1mb
+    /// let vec2: Vec<u8> = Vec::with_capacity(1024 * 1024); // 1mb
+    /// let stats = GLOBAL_ALLOCATOR.stats().unwrap();
+    /// assert_eq!(stats.segments, 1);
+    ///
+    /// GLOBAL_ALLOCATOR.set_threshold(2 * 1024 * 1024); // 2mb
+    /// let vec2: Vec<u8> = Vec::with_capacity(1024 * 1024); // 1mb
+    /// let stats = GLOBAL_ALLOCATOR.stats().unwrap();
+    /// assert_eq!(stats.segments, 1);
+    /// 
+    /// ````
+    pub fn set_threshold(&self, bytes: usize) {
+        self.threshold.store(bytes, Ordering::Relaxed);
     }
 
     /// Returns allocation statistics from the allocator
@@ -82,8 +108,9 @@ impl HugeGlobalAllocator {
 unsafe impl GlobalAlloc for HugeGlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
+        let threshold = self.threshold.load(Ordering::Relaxed);
 
-        if size >= self.threshold {
+        if threshold != 0 && size >= threshold {
             // Allocate the segment
             self.mapper.alloc(layout)
         } else {
@@ -113,7 +140,7 @@ unsafe impl GlobalAlloc for HugeGlobalAllocator {
 
         if self.mapper.is_managed_ptr(old_ptr) {
             // Old ptr is managed
-            if new_size >= self.threshold {
+            if new_size >= self.threshold.load(Ordering::Relaxed) {
                 // Old ptr is managed and new ptr should be too
                 self.mapper.realloc(old_ptr, new_layout)
             } else {
@@ -134,7 +161,7 @@ unsafe impl GlobalAlloc for HugeGlobalAllocator {
             }
         } else {
             // Old ptr is not managed
-            if new_size >= self.threshold {
+            if new_size >= self.threshold.load(Ordering::Relaxed) {
                 // Old ptr is not managed but new ptr should be
 
                 // Allocate new segment
