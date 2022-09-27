@@ -4,8 +4,10 @@ use std::ptr::null_mut;
 
 use lazy_static::lazy_static;
 
-use nix::sys::mman::{mmap, mremap, munmap, MapFlags, ProtFlags, MRemapFlags};
-use nix::unistd::{sysconf, SysconfVar};
+use nix::{
+    sys::mman::{mmap, mremap, munmap, MRemapFlags, MapFlags, ProtFlags},
+    unistd::{sysconf, SysconfVar},
+};
 
 use crate::HugeGlobalAllocator;
 
@@ -17,9 +19,9 @@ lazy_static! {
         match sysconf(SysconfVar::PAGE_SIZE) {
             Ok(val) => match val {
                 Some(val) => val as usize,
-                None => HugeGlobalAllocator::alloc_error("sysconf PAGE_SIZE no value", layout)
+                None => HugeGlobalAllocator::alloc_error_layout("sysconf PAGE_SIZE no value", layout)
             }
-            Err(_) => HugeGlobalAllocator::alloc_error("sysconf PAGE_SIZE failed", layout)
+            Err(_) => HugeGlobalAllocator::alloc_error_layout("sysconf PAGE_SIZE failed", layout)
         }
     };
 }
@@ -48,9 +50,19 @@ impl MMap {
         }
     }
 
+    // Returns the pointer as a usize
+    pub fn ptr(&self) -> usize {
+        self.ptr
+    }
+
     /// Returns the raw pointer to the memory mapped segment
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr as *mut u8
+    }
+
+    /// Returns the allocation size of the segment
+    pub fn layout(&self) -> Layout {
+        self.layout
     }
 
     /// Returns the allocation size of the segment
@@ -75,13 +87,15 @@ impl MMap {
 
         let ok = if self.alloc_size != new_alloc_size {
             // Try and remap
-            match unsafe { mremap(
-                self.ptr as *mut c_void,
-                self.alloc_size,
-                new_alloc_size,
-                MRemapFlags::MREMAP_MAYMOVE,
-                None
-            ) } {
+            match unsafe {
+                mremap(
+                    self.ptr as *mut c_void,
+                    self.alloc_size,
+                    new_alloc_size,
+                    MRemapFlags::MREMAP_MAYMOVE,
+                    None,
+                )
+            } {
                 Ok(ptr) => {
                     // Success
                     self.ptr = ptr as usize;
@@ -119,7 +133,7 @@ impl MMap {
             page_size,
         })
     }
-    
+
     /// Tries to map an anonymous read write segment with 2mb page size
     fn map_2mb(layout: Layout) -> nix::Result<MMap> {
         let page_size = 2 * 1024 * 1024;
@@ -163,7 +177,7 @@ impl Drop for MMap {
         let size = self.alloc_size();
 
         if unsafe { munmap(self.ptr as *mut c_void, size) }.is_err() {
-            HugeGlobalAllocator::alloc_error("MMapper::realloc: failed to unmap", self.layout);
+            HugeGlobalAllocator::alloc_error_layout("MMapper::realloc: failed to unmap", self.layout);
         }
     }
 }
